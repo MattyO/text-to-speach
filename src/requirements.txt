@@ -1,0 +1,6 @@
+PyGObject
+pystray
+Pillow
+PyAudio
+pynput
+numpy
