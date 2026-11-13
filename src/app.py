@@ -15,6 +15,7 @@ Right-click tray icon to quit.
 import os
 os.environ["ALSA_PCM_NO_ASYNC_SIGNALS"] = "1"  # suppress ALSA warnings
 import re
+import signal as _signal
 import subprocess
 import sys
 import threading
@@ -31,7 +32,7 @@ from PIL import Image, ImageDraw
 from pynput import keyboard
 
 # ── Configuration ──────────────────────────────────────────────
-RECORD_DIR = os.path.expanduser("~/recordings")
+RECORD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 MODEL_PATH = os.path.expanduser("~/.cache/vosk/vosk-model-small-en-us-0.15")
 SAMPLE_FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -45,6 +46,7 @@ is_recording = False
 _stop_event = None
 _indicator_win = None
 _vosk_model = None
+_pid_file = os.path.expanduser("~/.local/share/mic-recorder/pid")
 
 
 # ── Notifications ─────────────────────────────────────────────
@@ -416,6 +418,36 @@ def _on_release(key):
 _tray = None
 
 
+def _toggle_recording():
+    """Toggle recording state. Called by sxhkd signal or tray icon."""
+    global is_recording, _stop_event, _hotkey_active, _recording_thread
+
+    with _hotkey_lock:
+        if is_recording:
+            print(f"  [KEY] STOP (signal)", file=sys.stderr)
+            is_recording = False
+            _close_current_stream()
+            if _recording_thread and _recording_thread.is_alive():
+                for _ in range(30):
+                    if not _recording_thread.is_alive():
+                        break
+                    time.sleep(0.1)
+                _recording_thread.join(timeout=0.5)
+                print(f"  [KEY] thread joined", file=sys.stderr)
+            hide_overlay()
+            print(f"  [KEY] STOP done", file=sys.stderr)
+        else:
+            print(f"  [KEY] START (signal)", file=sys.stderr)
+            is_recording = True
+            _reset_recording_state()
+            _recording_thread = threading.Thread(target=_record, daemon=True)
+            print(f"  [REC] NEW THREAD {_recording_thread.name} STARTED", file=sys.stderr)
+            _recording_thread.start()
+            show_overlay()
+            print(f"  [KEY] START done", file=sys.stderr)
+        _update_tray()
+
+
 def _update_tray():
     """Update tray icon. Currently a no-op — visual feedback comes from overlay + notifications."""
     pass
@@ -430,7 +462,7 @@ def create_tray():
     _tray = pystray.Icon(
         "mic-recorder",
         icon=make_icon(False),
-        title="Idle — Ctrl+T to record",
+        title="Idle — Ctrl+Shift+R to record",
         menu=pystray.Menu(
             pystray.MenuItem("Idle — Ctrl+Shift+R to record", lambda i: None, enabled=False),
             pystray.Menu.SEPARATOR,
@@ -445,6 +477,17 @@ def main():
     global _vosk_model
 
     os.makedirs(RECORD_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(_pid_file), exist_ok=True)
+
+    # Write PID file for sxhkd to find us
+    with open(_pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
+    # Handle SIGUSR1 from sxhkd (toggle recording)
+    def _signal_handler(signum, frame):
+        threading.Thread(target=_toggle_recording, daemon=True).start()
+
+    _signal.signal(_signal.SIGUSR1, _signal_handler)
 
     # Load Vosk model once at startup
     try:
@@ -458,18 +501,14 @@ def main():
 
     tray = create_tray()
 
-    # Start hotkey listener (works on X11 without root)
-    with keyboard.Listener(on_press=_on_press, on_release=_on_release) as listener:
-        print(f"Mic Recorder started.")
-        print(f"    Recordings {RECORD_DIR}")
-        print(f"    Press Ctrl+Shift+R to start/stop recording + transcription")
-        print(f"    Right-click tray icon to quit.\n")
-        # Give the listener time to fully initialize before accepting hotkeys
-        import time
-        time.sleep(0.5)
+    print(f"Mic Recorder started.")
+    print(f"    Recordings: {RECORD_DIR}")
+    print(f"    Hotkey: Ctrl+Shift+R (via sxhkd)")
+    print(f"    Right-click tray icon to quit.\n")
+    time.sleep(0.5)
 
-        # Run tray in the main thread
-        tray.run()
+    # Run tray in the main thread
+    tray.run()
 
 
 if __name__ == "__main__":
