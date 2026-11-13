@@ -31,6 +31,14 @@ import pyperclip
 from PIL import Image, ImageDraw
 from pynput import keyboard
 
+# ── Config ─────────────────────────────────────────────────────
+from config_window import (
+    get_post_transcription_action,
+    get_post_transcription_command,
+    show_config_window,
+    _config_window_ref,
+)
+
 # ── Configuration ──────────────────────────────────────────────
 RECORD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 MODEL_PATH = os.path.expanduser("~/.cache/vosk/vosk-model-small-en-us-0.15")
@@ -270,7 +278,7 @@ def _reset_recording_state():
 
 
 def _transcribe_and_save(wav_path):
-    """Transcribe a WAV file in background, save .txt, send notifications."""
+    """Transcribe a WAV file in background, save .txt, apply configured action."""
     _notify("Transcribing", os.path.basename(wav_path))
 
     text = _transcribe(wav_path)
@@ -280,14 +288,36 @@ def _transcribe_and_save(wav_path):
             f.write(text)
         print(f"  Text:  {txt_dest}", file=sys.stderr)
 
-        # Copy text to clipboard for pasting with Ctrl+V
-        _copy_text_to_clipboard(text)
+        # Apply the configured post-transcription action
+        action = get_post_transcription_action()
+        if action == "cmd":
+            _run_command(text)
+        else:
+            # default: copy to clipboard
+            _copy_text_to_clipboard(text)
 
         # Truncate text for notification (max 100 chars)
         preview = text[:100] + ("..." if len(text) > 100 else "")
         _notify("Transcription complete", preview)
     else:
         _notify("Transcription failed", "Could not transcribe audio")
+
+
+def _run_command(text):
+    """Run the configured command with $TEXT replaced by the transcribed text."""
+    cmd_template = get_post_transcription_command()
+    cmd = cmd_template.replace("$TEXT", text)
+    try:
+        subprocess.run(
+            ["/bin/sh", "-c", cmd],
+            check=False,
+            timeout=30,
+        )
+        print(f"  [command] ran: {cmd}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"  [command] timeout: {cmd}", file=sys.stderr)
+    except Exception as exc:
+        print(f"  [command] error: {exc}", file=sys.stderr)
 
 
 def _copy_text_to_clipboard(text):
@@ -376,7 +406,15 @@ def _update_tray():
 
 
 def _stop(icon):
+    # Close config window if open
+    if _config_window_ref is not None:
+        _config_window_ref.destroy()
+        _config_window_ref = None
     icon.stop()
+
+
+def _settings(_icon):
+    show_config_window()
 
 
 def create_tray():
@@ -388,7 +426,9 @@ def create_tray():
         menu=pystray.Menu(
             pystray.MenuItem("Idle — Ctrl+Shift+R to record", lambda i: None, enabled=False),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", lambda i: _stop()),
+            pystray.MenuItem("Settings", _settings),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", lambda i: _stop(i)),
         ),
     )
     return _tray
