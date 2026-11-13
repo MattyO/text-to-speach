@@ -13,10 +13,16 @@ Right-click tray icon to quit.
 """
 
 import os
+os.environ["ALSA_PCM_NO_ASYNC_SIGNALS"] = "1"  # suppress ALSA warnings
+import re
+import subprocess
 import sys
 import threading
+import time
 import wave
 from datetime import datetime
+
+gi = None  # lazy import
 
 import pyaudio
 import pystray
@@ -30,6 +36,7 @@ SAMPLE_FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SAMPLE_RATE = 16000    # Vosk standard
 CHUNK = 1024
+INPUT_DEVICE = 1       # Razer Seiren X (hw:2,0) — see src/app.py constants for options
 
 
 # ── State ──────────────────────────────────────────────────────
@@ -37,6 +44,28 @@ is_recording = False
 _stop_event = None
 _indicator_win = None
 _vosk_model = None
+
+
+# ── Notifications ─────────────────────────────────────────────
+_tray_icon_ref = None
+
+
+def _notify(title, body, icon="audio-input-microphone"):
+    """Send a desktop notification."""
+    try:
+        subprocess.run(
+            ["notify-send", "-i", icon, "--hint", "string:x-canonical-private-synchronous:microphone",
+             title, body],
+            capture_output=True, timeout=5
+        )
+    except Exception:
+        print(f"  [notify] {title}: {body}", file=sys.stderr)
+
+
+def _basename(path):
+    """Get filename without extension and path."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    return re.sub(r"^recording_\d{4}-\d{2}-\d{2}_\d{6}_?", "", name).replace("_", " ") or "recording"
 
 
 # ── Icon generation ───────────────────────────────────────────
@@ -66,50 +95,80 @@ def make_icon(recording=False):
 # ── Recording indicator overlay ───────────────────────────────
 def show_overlay():
     """Show a small recording indicator overlay in the upper-right corner."""
-    global _indicator_win
     try:
-        from gi.repository import Gtk, Gdk
+        from gi.repository import Gtk, Gdk, GLib
 
-        # Hide any existing overlay
-        hide_overlay()
+        def _show():
+            global _indicator_win
+            _do_hide_overlay()
 
-        _indicator_win = Gtk.Window.new(Gtk.WindowType.POPUP)
-        _indicator_win.set_app_paintable(True)
+            _indicator_win = Gtk.Window.new(Gtk.WindowType.POPUP)
+            _indicator_win.set_app_paintable(True)
 
-        screen = Gdk.Screen.get_default()
-        width = Gdk.Screen.width(screen)
-        _indicator_win.set_size_request(120, 32)
-        _indicator_win.move(width - 140, 8)
-        _indicator_win.set_opacity(0.8)
+            display = Gdk.Display.get_default()
+            monitor = display.get_primary_monitor()
+            geometry = monitor.get_geometry()
+            screen_width = geometry.width
 
-        # Custom draw for rounded rect with red dot
-        def on_draw(widget, cr):
-            width, height = widget.get_size()
-            cr.set_source_rgba(0.15, 0.15, 0.18, 0.85)
-            cr.round_rect(0, 0, width, height, 8)
-            cr.fill()
+            _indicator_win.set_size_request(120, 32)
+            _indicator_win.move(screen_width - 140, 8)
+            _indicator_win.set_keep_above(True)
 
-            # Red dot
-            cr.set_source_rgba(220 / 255, 54 / 255, 54 / 255, 1)
-            cr.arc(24, height // 2, 7, 0, 2 * 3.14159)
-            cr.fill()
+            def on_draw(widget, cr):
+                global gi
+                if gi is None:
+                    import gi as _gi
+                    gi = _gi
+                    gi.require_version("PangoCairo", "1.0")
+                from gi.repository import Pango, PangoCairo
+                w, h = widget.get_size()
+                radius = 8
+                x, y = 0, 0
+                cr.set_source_rgba(0.15, 0.15, 0.18, 0.85)
+                cr.move_to(x + radius, y)
+                cr.line_to(x + w - radius, y)
+                cr.arc(x + w - radius, y + radius, radius, -0.5 * 3.14159, 0)
+                cr.line_to(x + w, y + h - radius)
+                cr.arc(x + w - radius, y + h - radius, radius, 0, 0.5 * 3.14159)
+                cr.line_to(x + radius, y + h)
+                cr.arc(x + radius, y + h - radius, radius, 0.5 * 3.14159, 1.0 * 3.14159)
+                cr.line_to(x, y + radius)
+                cr.arc(x + radius, y + radius, radius, 1.0 * 3.14159, 1.5 * 3.14159)
+                cr.close_path()
+                cr.fill()
 
-            # White "R" text
-            cr.set_source_rgba(1, 1, 1, 1)
-            cr.select_font_face("sans", Gdk.FontSlant.NORMAL, Gdk.FontWeight.BOLD)
-            cr.set_font_size(16)
-            cr.move_to(38, height // 2 + 6)
-            cr.show_text("REC")
+                cr.set_source_rgba(220 / 255, 54 / 255, 54 / 255, 1)
+                cr.arc(24, h // 2, 7, 0, 2 * 3.14159)
+                cr.fill()
 
-        _indicator_win.connect("draw", on_draw)
-        _indicator_win.show_all()
-        _indicator_win.raise_()
-        return _indicator_win
+                cr.set_source_rgba(1, 1, 1, 1)
+                layout = PangoCairo.create_layout(cr)
+                desc = Pango.FontDescription("sans bold 16")
+                layout.set_font_description(desc)
+                layout.set_text("REC")
+                cr.move_to(38, h // 2 + 4)
+                PangoCairo.update_layout(cr, layout)
+
+            _indicator_win.connect("draw", on_draw)
+            _indicator_win.show()
+
+        GLib.idle_add(_show)
+        return True
     except (ImportError, AttributeError):
         return None
 
 
 def hide_overlay():
+    try:
+        from gi.repository import GLib
+
+        GLib.idle_add(_do_hide_overlay)
+        return True
+    except (ImportError, AttributeError):
+        return None
+
+
+def _do_hide_overlay():
     global _indicator_win
     if _indicator_win is not None:
         _indicator_win.hide()
@@ -118,9 +177,17 @@ def hide_overlay():
 
 
 # ── Audio recording ───────────────────────────────────────────
-def _record(stop_event):
-    """Record audio until stop_event is set."""
+_recording_frames = []
+_frames_lock = threading.Lock()
+_stop_recording = threading.Event()
+_recording_ts = None  # timestamp set at START time
+
+
+def _record():
+    """Record audio until _stop_recording is set."""
     pa = None
+    stream = None
+    global _recording_ts
     try:
         pa = pyaudio.PyAudio()
         stream = pa.open(
@@ -129,26 +196,46 @@ def _record(stop_event):
             rate=SAMPLE_RATE,
             input=True,
             frames_per_buffer=CHUNK,
+            input_device_index=INPUT_DEVICE,
         )
+        stream.start_stream()
 
-        frames = []
-        while not stop_event.is_set():
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
+        global _recording_frames
+        _recording_frames = []
+        start_ts = _recording_ts  # capture at start
+        print(f"  [REC] T{threading.get_ident()} start_ts={start_ts}", file=sys.stderr)
+        while not _stop_recording.is_set():
+            try:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                with _frames_lock:
+                    _recording_frames.append(data)
+            except OSError:
+                break
+        print(f"  [REC] loop exited, {len(_recording_frames)} frames", file=sys.stderr)
 
         stream.stop_stream()
         stream.close()
 
-        # Write WAV directly (16kHz, 16-bit, mono — Vosk compatible)
+        frames = None
+        with _frames_lock:
+            frames = _recording_frames
+            _recording_frames = []
+
+        # Write WAV (16kHz, 16-bit, mono — Vosk compatible)
         os.makedirs(RECORD_DIR, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        dest = os.path.join(RECORD_DIR, f"recording_{ts}.wav")
+        write_ts = _recording_ts  # capture at write time
+        print(f"  [REC] T{threading.get_ident()} write_ts={write_ts}, start_ts={start_ts}", file=sys.stderr)
+        dest = os.path.join(RECORD_DIR, f"recording_{write_ts}.wav")
 
         counter = 1
+        print(f"  [REC] checking dest={dest}, exists={os.path.exists(dest)}", file=sys.stderr)
         while os.path.exists(dest):
-            dest = os.path.join(RECORD_DIR, f"recording_{ts}_{counter}.wav")
+            dest = os.path.join(RECORD_DIR, f"recording_{_recording_ts}_{counter}.wav")
             counter += 1
+            print(f"  [REC] exists, trying counter={counter}", file=sys.stderr)
+        print(f"  [REC] final dest={dest}", file=sys.stderr)
 
+        print(f"  [REC] WRITING {dest}", file=sys.stderr)
         with wave.open(dest, 'wb') as wf:
             wf.setnchannels(CHANNELS)
             wf.setsampwidth(pa.get_sample_size(SAMPLE_FORMAT))
@@ -156,18 +243,45 @@ def _record(stop_event):
             wf.writeframes(b''.join(frames))
 
         print(f"  Saved: {dest}", file=sys.stderr)
+        _notify("Recording saved", os.path.basename(dest))
 
-        # Transcribe with Vosk
-        text = _transcribe(dest)
-        if text is not None:
-            txt_dest = dest.replace(".wav", ".txt")
-            with open(txt_dest, "w") as f:
-                f.write(text)
-            print(f"  Text:  {txt_dest}", file=sys.stderr)
+        # Start transcription in background thread
+        threading.Thread(target=_transcribe_and_save, args=(dest,), daemon=True).start()
 
     finally:
         if pa:
             pa.terminate()
+
+
+def _close_current_stream():
+    """Signal the recording thread to stop."""
+    _stop_recording.set()
+
+
+def _reset_recording_state():
+    """Reset recording state for a new recording session."""
+    global _stop_recording, _recording_ts
+    _stop_recording = threading.Event()
+    _recording_ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    print(f"  [REC] session started, ts={_recording_ts}", file=sys.stderr)
+
+
+def _transcribe_and_save(wav_path):
+    """Transcribe a WAV file in background, save .txt, send notifications."""
+    _notify("Transcribing", os.path.basename(wav_path))
+
+    text = _transcribe(wav_path)
+    if text is not None:
+        txt_dest = wav_path.replace(".wav", ".txt")
+        with open(txt_dest, "w") as f:
+            f.write(text)
+        print(f"  Text:  {txt_dest}", file=sys.stderr)
+
+        # Truncate text for notification (max 100 chars)
+        preview = text[:100] + ("..." if len(text) > 100 else "")
+        _notify("Transcription complete", preview)
+    else:
+        _notify("Transcription failed", "Could not transcribe audio")
 
 
 def _transcribe(wav_path):
@@ -207,52 +321,79 @@ def _transcribe(wav_path):
 # ── Hotkey handling ───────────────────────────────────────────
 _pressed_keys = set()
 _hotkey_lock = threading.Lock()
+_hotkey_active = False
+_recording_thread = None
+
+
+def _check_hotkey():
+    """Check if Ctrl+T is currently pressed. Returns True if so."""
+    ctrl_alt = any(
+        isinstance(k, keyboard.Key) and k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
+        for k in _pressed_keys
+    ) and any(
+        isinstance(k, keyboard.Key) and k in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r)
+        for k in _pressed_keys
+    )
+
+    t = any(
+        hasattr(k, 'char') and k.char == 'z'
+        for k in _pressed_keys
+    )
+    return ctrl_alt and t
 
 
 def _on_press(key):
-    global is_recording, _stop_event
+    global is_recording, _stop_event, _hotkey_active, _recording_thread
 
     with _hotkey_lock:
-        # Track pressed keys
         try:
             _pressed_keys.add(key)
         except TypeError:
             pass
 
-        # Check for Ctrl+T
-        ctrl = any(
-            isinstance(k, keyboard.Key) and k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
-            for k in _pressed_keys
-        )
-        t = any(
-            hasattr(k, 'char') and k.char == 't'
-            for k in _pressed_keys
-        )
+        # Reset active flag if combo was released
+        if _check_hotkey():
+            pass  # still held
+        elif _hotkey_active:
+            _hotkey_active = False
 
-        if ctrl and t:
+        # Only act on rising edge of key combination
+        if _check_hotkey() and not _hotkey_active:
+            _hotkey_active = True
             if is_recording:
-                # Stop
+                print(f"  [KEY] STOP", file=sys.stderr)
                 is_recording = False
-                _stop_event.set()
+                _close_current_stream()
+                if _recording_thread and _recording_thread.is_alive():
+                    for _ in range(30):
+                        if not _recording_thread.is_alive():
+                            break
+                        time.sleep(0.1)
+                    _recording_thread.join(timeout=0.5)
+                    print(f"  [KEY] thread joined", file=sys.stderr)
                 hide_overlay()
+                print(f"  [KEY] STOP done", file=sys.stderr)
             else:
-                # Start
+                print(f"  [KEY] START", file=sys.stderr)
                 is_recording = True
-                _stop_event = threading.Event()
-                t = threading.Thread(target=_record, args=(_stop_event,), daemon=True)
-                t.start()
+                _reset_recording_state()
+                _recording_thread = threading.Thread(target=_record, daemon=True)
+                print(f"  [REC] NEW THREAD {_recording_thread.name} STARTED", file=sys.stderr)
+                _recording_thread.start()
                 show_overlay()
-
-            # Update tray icon
+                print(f"  [KEY] START done", file=sys.stderr)
             _update_tray()
 
 
 def _on_release(key):
+    global _hotkey_active
     with _hotkey_lock:
         try:
             _pressed_keys.discard(key)
         except TypeError:
             pass
+        if not _check_hotkey():
+            _hotkey_active = False
 
 
 # ── Tray icon ──────────────────────────────────────────────────
@@ -260,22 +401,8 @@ _tray = None
 
 
 def _update_tray():
-    global _tray
-    if _tray is None:
-        return
-
-    status = "Recording... Ctrl+T to stop" if is_recording else "Idle — Ctrl+T to record"
-
-    _tray.icon = pystray.Icon(
-        "mic-recorder",
-        image=make_icon(is_recording),
-        title=status,
-        menu=pystray.Menu(
-            pystray.MenuItem(status, lambda i: None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", lambda i: _stop()),
-        ),
-    )
+    """Update tray icon. Currently a no-op — visual feedback comes from overlay + notifications."""
+    pass
 
 
 def _stop(icon):
@@ -286,7 +413,7 @@ def create_tray():
     global _tray
     _tray = pystray.Icon(
         "mic-recorder",
-        image=make_icon(False),
+        icon=make_icon(False),
         title="Idle — Ctrl+T to record",
         menu=pystray.Menu(
             pystray.MenuItem("Idle — Ctrl+T to record", lambda i: None, enabled=False),
@@ -317,10 +444,13 @@ def main():
 
     # Start hotkey listener (works on X11 without root)
     with keyboard.Listener(on_press=_on_press, on_release=_on_release) as listener:
-        print(f"\ud83c\udf99\ufe0f  Mic Recorder started.")
-        print(f"    Recordings \u2192 {RECORD_DIR}")
+        print(f"Mic Recorder started.")
+        print(f"    Recordings {RECORD_DIR}")
         print(f"    Press Ctrl+T to start/stop recording + transcription")
         print(f"    Right-click tray icon to quit.\n")
+        # Give the listener time to fully initialize before accepting hotkeys
+        import time
+        time.sleep(0.5)
 
         # Run tray in the main thread
         tray.run()
