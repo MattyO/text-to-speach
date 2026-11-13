@@ -333,86 +333,8 @@ def _transcribe(wav_path):
         return None
 
 
-# ── Hotkey handling ───────────────────────────────────────────
-_pressed_keys = set()
 _hotkey_lock = threading.Lock()
-_hotkey_active = False
 _recording_thread = None
-
-
-def _check_hotkey():
-    """Check if Ctrl+Shift+R is currently pressed. Returns True if so."""
-    has_ctrl = any(
-        isinstance(k, keyboard.Key) and k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
-        for k in _pressed_keys
-    )
-    has_shift = any(
-        isinstance(k, keyboard.Key) and k in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)
-        for k in _pressed_keys
-    )
-    has_r = any(
-        hasattr(k, 'char') and k.char == 'R'
-        for k in _pressed_keys
-    )
-    #if any([has_ctrl, has_shift, has_r]):
-    #    print(f'some hotkeys are pressed ctrl:{has_ctrl} shift:{has_shift} r:{has_r}')
-    #    print(_pressed_keys)
-    return has_ctrl and has_shift and has_r
-
-
-def _on_press(key):
-    global is_recording, _stop_event, _hotkey_active, _recording_thread
-
-    with _hotkey_lock:
-        try:
-            _pressed_keys.add(key)
-        except TypeError:
-            pass
-
-        # Reset active flag if combo was released
-        if _check_hotkey():
-            pass  # still held
-        elif _hotkey_active:
-            _hotkey_active = False
-
-        # Only act on rising edge of key combination
-        if _check_hotkey() and not _hotkey_active:
-            _hotkey_active = True
-            if is_recording:
-                print(f"  [KEY] STOP", file=sys.stderr)
-                is_recording = False
-                _close_current_stream()
-                if _recording_thread and _recording_thread.is_alive():
-                    for _ in range(30):
-                        if not _recording_thread.is_alive():
-                            break
-                        time.sleep(0.1)
-                    _recording_thread.join(timeout=0.5)
-                    print(f"  [KEY] thread joined", file=sys.stderr)
-                hide_overlay()
-                print(f"  [KEY] STOP done", file=sys.stderr)
-            else:
-                print(f"  [KEY] START", file=sys.stderr)
-                is_recording = True
-                _reset_recording_state()
-                _recording_thread = threading.Thread(target=_record, daemon=True)
-                print(f"  [REC] NEW THREAD {_recording_thread.name} STARTED", file=sys.stderr)
-                _recording_thread.start()
-                show_overlay()
-                print(f"  [KEY] START done", file=sys.stderr)
-            _update_tray()
-
-
-def _on_release(key):
-    global _hotkey_active
-    with _hotkey_lock:
-        try:
-            _pressed_keys.discard(key)
-        except TypeError:
-            pass
-        if not _check_hotkey():
-            _hotkey_active = False
-
 
 # ── Tray icon ──────────────────────────────────────────────────
 _tray = None
