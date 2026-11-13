@@ -1,0 +1,14 @@
+[Unit]
+Description=Mic Recorder - Background audio recorder with hotkey activation
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/matty/workspace/tts/env/bin/python /home/matty/workspace/tts/src/app.py
+Environment=DISPLAY=:0
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
