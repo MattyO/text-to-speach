@@ -8,7 +8,7 @@ Usage:
     python app.py              # Run in foreground
     python app.py &            # Run in background
 
-Hotkey: Ctrl+T  (toggle recording on/off)
+Hotkey: Ctrl+Shift+R  (toggle recording on/off)
 Right-click tray icon to quit.
 """
 
@@ -326,20 +326,23 @@ _recording_thread = None
 
 
 def _check_hotkey():
-    """Check if Ctrl+T is currently pressed. Returns True if so."""
-    ctrl_alt = any(
+    """Check if Ctrl+Shift+R is currently pressed. Returns True if so."""
+    has_ctrl = any(
         isinstance(k, keyboard.Key) and k in (keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
         for k in _pressed_keys
-    ) and any(
-        isinstance(k, keyboard.Key) and k in (keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r)
+    )
+    has_shift = any(
+        isinstance(k, keyboard.Key) and k in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)
         for k in _pressed_keys
     )
-
-    t = any(
-        hasattr(k, 'char') and k.char == 'z'
+    has_r = any(
+        hasattr(k, 'char') and k.char == 'R'
         for k in _pressed_keys
     )
-    return ctrl_alt and t
+    #if any([has_ctrl, has_shift, has_r]):
+    #    print(f'some hotkeys are pressed ctrl:{has_ctrl} shift:{has_shift} r:{has_r}')
+    #    print(_pressed_keys)
+    return has_ctrl and has_shift and has_r
 
 
 def _on_press(key):
@@ -416,7 +419,7 @@ def create_tray():
         icon=make_icon(False),
         title="Idle — Ctrl+T to record",
         menu=pystray.Menu(
-            pystray.MenuItem("Idle — Ctrl+T to record", lambda i: None, enabled=False),
+            pystray.MenuItem("Idle — Ctrl+Shift+R to record", lambda i: None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", lambda i: _stop()),
         ),
@@ -446,7 +449,7 @@ def main():
     with keyboard.Listener(on_press=_on_press, on_release=_on_release) as listener:
         print(f"Mic Recorder started.")
         print(f"    Recordings {RECORD_DIR}")
-        print(f"    Press Ctrl+T to start/stop recording + transcription")
+        print(f"    Press Ctrl+Shift+R to start/stop recording + transcription")
         print(f"    Right-click tray icon to quit.\n")
         # Give the listener time to fully initialize before accepting hotkeys
         import time
