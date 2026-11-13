@@ -3,4 +3,5 @@ pystray
 Pillow
 PyAudio
 pynput
+pyperclip
 numpy

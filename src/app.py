@@ -26,6 +26,7 @@ gi = None  # lazy import
 
 import pyaudio
 import pystray
+import pyperclip
 from PIL import Image, ImageDraw
 from pynput import keyboard
 
@@ -277,11 +278,23 @@ def _transcribe_and_save(wav_path):
             f.write(text)
         print(f"  Text:  {txt_dest}", file=sys.stderr)
 
+        # Copy text to clipboard for pasting with Ctrl+V
+        _copy_text_to_clipboard(text)
+
         # Truncate text for notification (max 100 chars)
         preview = text[:100] + ("..." if len(text) > 100 else "")
         _notify("Transcription complete", preview)
     else:
         _notify("Transcription failed", "Could not transcribe audio")
+
+
+def _copy_text_to_clipboard(text):
+    """Copy text to the system clipboard via pyperclip."""
+    try:
+        pyperclip.copy(text)
+        print(f"  [clipboard] copied", file=sys.stderr)
+    except Exception:
+        print(f"  [clipboard] warning: clipboard copy failed", file=sys.stderr)
 
 
 def _transcribe(wav_path):
