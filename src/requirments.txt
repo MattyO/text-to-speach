@@ -1,5 +1,0 @@
-PyGObject <= 3.50.0
-pystray
-dbus-python
-cairosvg
-pyaudio
